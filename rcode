@@ -1,0 +1,252 @@
+# http://archive.ics.uci.edu/ml/datasets/Bank+Marketing#
+rm(list=ls(all=TRUE))
+library(MASS)
+library(ISLR)
+library(pROC)
+library(ISLR)
+library(class)
+library(leaps)
+library(glmnet)
+library(ggplot2)
+library(tree)
+library(e1071)
+library(class)
+
+
+bank<-read.csv(file="~/Documents/MATH 180/bank/bank-additional-full.csv",header=TRUE,sep=";")
+
+
+#bank$month[1:10000]
+#bank$month[20001:30000]
+#bank$month[30001:40000]
+#bank$month[40001:41188]
+
+# convert response variable from yes no to 1 0
+realy=rep(0,nrow(bank))
+realy[bank$y=="yes"]=1
+bank=data.frame(bank,realy)
+bank=bank[,-21]
+
+
+
+# remove duration and others non customer related variable
+# remove duration
+bank=bank[,-11]
+
+# first year 1:27690
+# second year 27691:39130
+#third year 39131:41188
+bank1=bank[1:27690,]
+bank2=bank[27691:39130,]
+bank3=bank[39131:41188,]
+
+# working on the third year
+
+# plot outcome on poutcome and contact check decision boundry
+
+poutcome.num = (-1)*(bank3$poutcome=="failure") + 1*(bank3$poutcome=="success")
+contact.num=(bank3$contact=="cellular")*1
+# index where the outcome is success
+yr = which(bank3$realy==1)
+
+plot(jitter(contact.num[yr]),jitter(poutcome.num[yr]),col="green",pch=19,xlab="Contact Type",ylab="Previous Outcome",xaxt="n",yaxt="n")
+points(jitter(contact.num[-yr]),jitter(poutcome.num[-yr]),col="red",pch=19)
+axis(1,at=c(0,1),labels=c("Telephone","Cellular"))
+axis(2,at=c(-1,0,1),labels=c("Failure","Nonexistent","Success"))
+
+
+
+
+# split into training and testing
+set.seed(3)
+train=sample(1:nrow(bank3),nrow(bank3)*0.8)
+bank3.test=bank3[-train,]
+bank3.train=bank3[train,]
+
+
+# boosting decision tree
+library(gbm)
+
+# 
+set.seed(1)
+xxx=gbm(realy~., data=bank3.train, distribution='adaboost',
+        interaction.depth =1  ,n.tree=5000,shrinkage = 0.00112)
+yhat=predict(xxx,newdata=bank3.test,n.trees = 5000,type="response")
+yyy<-rep(0,nrow(bank3.test))
+yyy[yhat>0.5]=1
+yhaty=predict(xxx,n.trees = 5000,type="response")
+zzz<-rep(0,nrow(bank3.train))
+zzz[yhaty>0.5]=1
+mean(zzz!=bank3.train$realy)
+mean(yyy!=bank3.test$realy)
+
+
+# test error rate is only 0.2597087
+# let's tune parameter: shrinkage and see if we can get a better test error rate
+shrink=seq(0.00667,0.00001,length.out=50)
+mymean=rep(0,50)
+
+
+for(i in 1:length(shrink)){
+  set.seed(1)
+  xxx=gbm(realy~., data=bank3.train, distribution='adaboost',
+          shrinkage =shrink[i],n.tree=5000,interaction.depth=1)
+  yhat=predict(xxx,newdata=bank3.test,n.trees = 5000,type="response")
+  yyy<-rep(0,nrow(bank3.test))
+  yyy[yhat>0.5]=1
+  mymean[i]=mean(yyy!=bank3.test$realy)
+  
+}
+
+mymean[which.min(mymean)]
+# test error rate is still 0.2597087
+
+# plot test error rate over shrinkage
+plot(sort(shrink,decreasing = TRUE),mymean,type='l',xlab='Shrinkage',ylab='Test error rate',main='Turning Shrinkage Parameter')
+mypoint=which.min(mymean)
+points(shrink[mypoint],mymean[mypoint],pch=20,type='p')
+
+# use the best shrinkage on boosting tree
+
+
+set.seed(1)
+xxx=gbm(realy~., data=bank3.train, distribution='adaboost',
+        interaction.depth =1  ,n.tree=5000,shrinkage = shrink[which.min(mymean)])
+yhat=predict(xxx,newdata=bank3.test,n.trees = 5000,type="response")
+yyy<-rep(0,nrow(bank3.test))
+yyy[yhat>0.5]=1
+mean(yyy!=bank3.test$realy)
+table(yyy,bank3.test$realy)
+
+# importance of predictor
+summary(xxx)
+
+# use the tree from boosting to predict using individual predictor
+set.seed(1)
+xx=gbm(realy~pdays, data=bank3.train, distribution='adaboost',
+        interaction.depth =1  ,n.tree=5000,shrinkage = shrink[which.min(mymean)])
+yyhat=predict(xx,newdata=bank3.test,n.trees = 5000,type="response")
+yy<-rep(0,nrow(bank3.test))
+yy[yyhat>0.5]=1
+mean(yy!=bank3.test$realy)
+
+summary(xx)
+
+# logistic regression
+mod.glm=glm(realy~., data=bank3.train,family='binomial')  
+mypred = predict(mod.glm,newdata = bank3.test,type='response')
+realpred=rep(0,nrow(bank3.test))
+realpred[mypred>0.5]=1
+logistic.error=mean(realpred!=bank3.test$realy)
+table(realpred,bank3.test$realy)
+# test error is 0.2839806
+
+# lets try Ridge regression
+# Ridge
+# get dataset ready to use glmnet
+set.seed(10)
+x<-model.matrix(realy~.,bank3.train)[,-20]
+y<-na.omit(bank3.train$realy)
+x.t<-model.matrix(realy~.,bank3.test)[,-20]
+# perform 10 fold CV on ridge regression and predict on the test set
+cv.ridge = cv.glmnet(x,y,alpha=0,family="binomial")
+bestlam<-cv.ridge$lambda.min
+pred.ridge = predict(cv.ridge,s=bestlam,newx=x.t,type="response")
+# convert probability into yes and no
+real.ridge=rep(0,length(bank3.test$realy))
+real.ridge[pred.ridge>0.5]=1
+# test error rate
+ridge.error=mean(real.ridge!=bank3.test$realy)
+# test error rate is 0.2839806
+
+# KNN
+train.x<-data.matrix(bank3.train[,-20])
+test.x<-data.matrix(bank3.test[,-20])
+train.y<-data.matrix(bank3.train[,20])
+test.y<-data.matrix(bank3.test[,20])
+set.seed(1)
+# find the best k with cross validation
+temp=rep(0,100)
+
+for(i in 1:length(temp))
+   {
+  knn.pred<-knn(train.x,test.x,train.y,k=i)
+  temp[i]=mean(knn.pred!=bank3.test$realy)
+}
+
+ plot(1:100,temp)
+ lines(1:100,temp)
+ bestk=which.min(temp)
+# best k is 23
+ knn.pred<-knn(train.x,test.x,train.y,k=bestk,prob=TRUE)
+ knn.error=mean(knn.pred!=bank3.test$realy)
+################
+mean(yyy!=bank3.test$realy)
+logistic.error=mean(realpred!=bank3.test$realy)
+ridge.error=mean(real.ridge!=bank3.test$realy)
+knn.error=mean(knn.pred!=bank3.test$realy)
+
+# ROC curve
+library(pROC)
+
+myroc.b = roc(response=bank3.test$realy,predictor=yhat)
+# AROC is 0.7927
+myroc.lr = roc(response=bank3.test$realy,predictor=mypred)
+# AROC is 0.7791
+myroc.ridge=roc(response=bank3.test$realy,predictor=pred.ridge)
+# AROC is 0.7794
+ myroc.knn=roc(response=bank3.test$realy,predictor=attributes(knn.pred)$prob)
+# AROC is 0.5719
+
+plot(myroc.b)
+lines(myroc.lr,col='red')
+lines(myroc.ridge,col='blue')
+lines(myroc.knn,col='yellow')
+labels=c('DT      Black','LR      Red','Ridge Blue','KNN   Yellow')
+legend(0.4,0.4,labels,col=c(1,2,3,4),bty='n')
+
+
+########### support vector machine
+
+# transform from 0,1 to -1,1
+bank3.train$realy[bank3.train$realy==0]=-1
+# make realy as factor
+bank3.train$realy=as.factor(bank3.train$realy)
+bank3=data.frame(bank3)
+svm.fit = svm(realy ~ .,data=bank3.train,kernel="polynomial")
+
+
+set.seed (1)
+# tuneout=tune(svm,realy~.,data=bank3.train,kernel="radial",
+#               ranges=list(cost=10^(-2:2),gamma=10^(-2:2)))
+
+tuneout=tune(svm,realy~.,data=bank3.train,kernel="sigmoid",
+             ranges=list(cost=10^(-2:2),gamma=10^(-2:2)))
+
+
+
+bestmod=tuneout$best.model
+summary(bestmod)
+# transform from 0,1 to -1,1
+bank3.test$realy[bank3.test$realy==0]=-1
+# make realy as factor
+bank3.test$realy=as.factor(bank3.test$realy)
+
+
+yyhat=predict(bestmod,newdata=bank3.test)
+table(predict=yyhat, truth=bank3.test$realy)
+1-sum(diag(table(predict=yyhat, truth=bank3.test$realy)))/nrow(bank3.test)
+
+# test error rate 0.2815534 with cost 10 and gamma 0.01
+
+yyhat.pro=predict(bestmod,newdata=bank3.test,type='prob')
+
+
+
+mod.gam=gam(realy~.,data=bank3.train,family='binomial')
+
+plot(mod.gam,se=T,col="green")
+
+
+
+
